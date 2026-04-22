@@ -1,8 +1,14 @@
+#![warn(clippy::all)]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
+
 mod mapped_view;
 
-use std::{mem::size_of, thread, time::Duration};
+use std::{collections::VecDeque, mem::size_of, thread, time::Duration};
 
 use compio::time::Interval;
+use egui::IconData;
+use egui_plot::{Line, Plot, PlotPoints};
+use flume::Receiver;
 use futures::{StreamExt, pin_mut};
 use mapped_view::MappedView;
 use windows::{
@@ -43,6 +49,20 @@ struct PhysicsPage {
     throttle: f32,
     /// Brake input in the range `0.0–1.0`.
     brake: f32,
+}
+
+struct Inputs {
+    throttle: f64,
+    brake: f64,
+}
+
+impl From<PhysicsPage> for Inputs {
+    fn from(page: PhysicsPage) -> Self {
+        Self {
+            throttle: page.throttle as f64,
+            brake: page.brake as f64,
+        }
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -173,7 +193,7 @@ fn main() {
     )
     .expect("cannot open shared memory – is Assetto Corsa Evo running?");
 
-    let (sender, receiver) = flume::bounded::<PhysicsPage>(1000);
+    let (sender, receiver) = flume::bounded::<Inputs>(1000);
     let _thread_guard = thread::spawn(move || {
         let _runtime = compio::runtime::Runtime::new().unwrap().block_on(async {
             let ticker = compio::time::interval(Duration::from_millis(PERIOD_MS));
@@ -184,18 +204,177 @@ fn main() {
             });
 
             pin_mut!(data_stream);
-            while let Some(input) = data_stream.next().await {
-                sender.send(input).ok();
+            while let Some(physics) = data_stream.next().await {
+                sender.send(Inputs::from(physics)).ok();
             }
         });
     });
 
-    loop {
-        let physics = receiver.recv().ok().unwrap();
-        println!(
-            "[compio timer]   throttle: {:.3}  brake: {:.3}",
-            physics.throttle, physics.brake
-        );
-    }
+    env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
+
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([400.0, 300.0])
+            .with_min_inner_size([300.0, 220.0])
+            .with_icon(
+                IconData::default(), // NOTE: Adding an icon is optional
+                                     // eframe::icon_data::from_png_bytes(
+                                     //     &include_bytes!("../assets/favicon-512x512.png")[..],
+                                     // )
+                                     // .expect("Failed to load icon"),
+            ),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "eframe template",
+        native_options,
+        Box::new(|cc| Ok(Box::new(App::new(cc, receiver)))),
+    )
+    .unwrap();
     // run_hires_timer().await;
 }
+
+pub struct App {
+    // Example stuff:
+    label: String,
+
+    value: f32,
+    receiver: Receiver<Inputs>,
+    queue: VecDeque<Inputs>,
+}
+
+impl App {
+    /// Called once before the first frame.
+    fn new(cc: &eframe::CreationContext<'_>, receiver: Receiver<Inputs>) -> Self {
+        Self {
+            label: "Hello World!".to_owned(),
+            value: 2.7,
+            receiver: receiver,
+            queue: VecDeque::with_capacity(1000),
+        }
+    }
+}
+
+impl App {}
+
+impl eframe::App for App {
+    /// Called each time the UI needs repainting, which may be many times per second.
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Put your widgets into a `SidePanel`, `TopBottomPanel`, `CentralPanel`, `Window` or `Area`.
+        // For inspiration and more examples, go to https://emilk.github.io/egui
+
+        // let sin: PlotPoints = (0..1000)
+        //     .map(|i| {
+        //         let x = i as f64 * 0.01;
+        //         [x, x.sin()]
+        //     })
+        //     .collect();
+
+        // let mut queue = VecDeque::with_capacity(1000);
+        let inputs = self.receiver.recv().unwrap();
+        // println!(
+        //     "[compio timer]  {} throttle: {:.3}  brake: {:.3}",
+        //     inputs.packet_id, inputs.throttle, inputs.brake
+        // );
+
+        self.queue.push_back(inputs);
+        if self.queue.len() >= 1000 {
+            self.queue.pop_front();
+        }
+
+        let throttle_line = Line::new(
+            "inputs",
+            PlotPoints::from_iter(
+                self.queue
+                    .iter()
+                    .enumerate()
+                    .map(|(index, input)| [index as f64, input.throttle]),
+            ),
+        )
+        .width(1.0)
+        .color(egui::Color32::GREEN);
+
+        let brake_line = Line::new(
+            "inputs",
+            PlotPoints::from_iter(
+                self.queue
+                    .iter()
+                    .enumerate()
+                    .map(|(index, input)| [index as f64, input.brake]),
+            ),
+        )
+        .width(1.0)
+        .color(egui::Color32::RED);
+        // egui::Panel::top("top_panel").show_inside(ui, |ui| {
+        //     // The top panel is often a good place for a menu bar:
+
+        //     egui::MenuBar::new().ui(ui, |ui| {
+        //         // NOTE: no File->Quit on web pages!
+        //         ui.menu_button("File", |ui| {
+        //             if ui.button("Quit").clicked() {
+        //                 ui.send_viewport_cmd(egui::ViewportCommand::Close);
+        //             }
+        //         });
+        //         ui.add_space(16.0);
+
+        //         egui::widgets::global_theme_preference_buttons(ui);
+        //     });
+        // });
+
+        egui::CentralPanel::default().show_inside(ui, |ui| {
+            // The central panel the region left after adding TopPanel's and SidePanel's
+            ui.heading("eframe template");
+
+            Plot::new("pedal_inputs")
+                // .view_aspect(2.0)
+                .view_aspect(6.0) // Keep the plot square since data is 0.0 to 1.0
+                .include_x(0.0)
+                .include_x(1.0)
+                .include_y(0.0)
+                .include_y(1.0)
+                .show(ui, |plot_ui| {
+                    plot_ui.line(throttle_line);
+                    plot_ui.line(brake_line);
+                });
+            // plot_ui.line(Line::new(points).width(2.0).color(egui::Color32::RED));
+
+            // ui.horizontal(|ui| {
+            //     ui.label("Write something: ");
+            //     ui.text_edit_singleline(&mut self.label);
+            // });
+
+            // ui.add(egui::Slider::new(&mut self.value, 0.0..=10.0).text("value"));
+            // if ui.button("Increment").clicked() {
+            //     self.value += 1.0;
+            // }
+
+            // ui.separator();
+
+            // ui.add(egui::github_link_file!(
+            //     "https://github.com/emilk/eframe_template/blob/main/",
+            //     "Source code."
+            // ));
+
+            // ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+            //     powered_by_egui_and_eframe(ui);
+            //     egui::warn_if_debug_build(ui);
+            // });
+        });
+
+        ui.request_repaint();
+    }
+}
+
+// fn powered_by_egui_and_eframe(ui: &mut egui::Ui) {
+//     ui.horizontal(|ui| {
+//         ui.spacing_mut().item_spacing.x = 0.0;
+//         ui.label("Powered by ");
+//         ui.hyperlink_to("egui", "https://github.com/emilk/egui");
+//         ui.label(" and ");
+//         ui.hyperlink_to(
+//             "eframe",
+//             "https://github.com/emilk/egui/tree/master/crates/eframe",
+//         );
+//         ui.label(".");
+//     });
+// }
