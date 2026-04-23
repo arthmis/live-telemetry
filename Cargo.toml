@@ -28,3 +28,6 @@ features = [
 
 [profile.dev.package."*"]
 opt-level = 2
+
+[package.metadata.packager]
+before-packaging-command = "cargo build --release"
