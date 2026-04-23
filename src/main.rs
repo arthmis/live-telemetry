@@ -6,7 +6,7 @@ mod mapped_view;
 use std::{collections::VecDeque, mem::size_of, thread, time::Duration};
 
 use compio::time::Interval;
-use egui::IconData;
+use egui::{Color32, IconData, Stroke, Theme};
 use egui_plot::{Line, Plot, PlotPoints};
 use flume::Receiver;
 use futures::{StreamExt, pin_mut};
@@ -51,6 +51,7 @@ struct PhysicsPage {
     brake: f32,
 }
 
+#[derive(Clone, Copy, Debug)]
 struct Inputs {
     throttle: f64,
     brake: f64,
@@ -59,8 +60,8 @@ struct Inputs {
 impl From<PhysicsPage> for Inputs {
     fn from(page: PhysicsPage) -> Self {
         Self {
-            throttle: page.throttle as f64,
-            brake: page.brake as f64,
+            throttle: (page.throttle * 100.) as f64,
+            brake: (page.brake * 100.) as f64,
         }
     }
 }
@@ -214,19 +215,25 @@ fn main() {
 
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([400.0, 300.0])
-            .with_min_inner_size([300.0, 220.0])
+            .with_inner_size([600.0, 125.0])
+            .with_min_inner_size([300.0, 100.0])
             .with_icon(
                 IconData::default(), // NOTE: Adding an icon is optional
                                      // eframe::icon_data::from_png_bytes(
                                      //     &include_bytes!("../assets/favicon-512x512.png")[..],
                                      // )
                                      // .expect("Failed to load icon"),
-            ),
+            )
+            .with_title("Pedal Overlay")
+            // .with_inner_size([win_w, win_h])
+            // .with_position(egui::pos2(pos_x, pos_y))
+            .with_decorations(false)
+            // .with_transparent(true)
+            .with_always_on_top(),
         ..Default::default()
     };
     eframe::run_native(
-        "eframe template",
+        "Pedal Overlay",
         native_options,
         Box::new(|cc| Ok(Box::new(App::new(cc, receiver)))),
     )
@@ -235,22 +242,33 @@ fn main() {
 }
 
 pub struct App {
-    // Example stuff:
-    label: String,
-
-    value: f32,
     receiver: Receiver<Inputs>,
     queue: VecDeque<Inputs>,
+    drag_pending: bool,
 }
 
 impl App {
     /// Called once before the first frame.
     fn new(cc: &eframe::CreationContext<'_>, receiver: Receiver<Inputs>) -> Self {
+        let visuals = egui::Visuals {
+            dark_mode: true,
+            panel_fill: Color32::TRANSPARENT,
+            window_fill: Color32::TRANSPARENT,
+            override_text_color: Some(Color32::from_rgb(220, 225, 232)),
+            ..egui::Visuals::dark()
+        };
+        cc.egui_ctx.set_visuals_of(Theme::Dark, visuals);
+        cc.egui_ctx.set_theme(Theme::Dark);
+
         Self {
-            label: "Hello World!".to_owned(),
-            value: 2.7,
             receiver: receiver,
-            queue: VecDeque::with_capacity(1000),
+            queue: VecDeque::from(
+                [Inputs {
+                    throttle: 0.0,
+                    brake: 100.0,
+                }; 1000],
+            ),
+            drag_pending: false,
         }
     }
 }
@@ -262,23 +280,10 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // Put your widgets into a `SidePanel`, `TopBottomPanel`, `CentralPanel`, `Window` or `Area`.
         // For inspiration and more examples, go to https://emilk.github.io/egui
-
-        // let sin: PlotPoints = (0..1000)
-        //     .map(|i| {
-        //         let x = i as f64 * 0.01;
-        //         [x, x.sin()]
-        //     })
-        //     .collect();
-
-        // let mut queue = VecDeque::with_capacity(1000);
         let inputs = self.receiver.recv().unwrap();
-        // println!(
-        //     "[compio timer]  {} throttle: {:.3}  brake: {:.3}",
-        //     inputs.packet_id, inputs.throttle, inputs.brake
-        // );
 
         self.queue.push_back(inputs);
-        if self.queue.len() >= 1000 {
+        if self.queue.len() >= 500 {
             self.queue.pop_front();
         }
 
@@ -305,76 +310,122 @@ impl eframe::App for App {
         )
         .width(1.0)
         .color(egui::Color32::RED);
-        // egui::Panel::top("top_panel").show_inside(ui, |ui| {
-        //     // The top panel is often a good place for a menu bar:
 
-        //     egui::MenuBar::new().ui(ui, |ui| {
-        //         // NOTE: no File->Quit on web pages!
-        //         ui.menu_button("File", |ui| {
-        //             if ui.button("Quit").clicked() {
-        //                 ui.send_viewport_cmd(egui::ViewportCommand::Close);
-        //             }
-        //         });
-        //         ui.add_space(16.0);
+        {
+            let panel_rect = ui.max_rect();
+            let grip_size = 14.0;
+            let grip_rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    panel_rect.right() - grip_size,
+                    panel_rect.bottom() - grip_size,
+                ),
+                egui::Vec2::splat(grip_size),
+            );
 
-        //         egui::widgets::global_theme_preference_buttons(ui);
-        //     });
-        // });
+            let (primary_pressed, primary_down, delta, hover_pos) = ui.ctx().input(|i| {
+                (
+                    i.pointer.primary_pressed(),
+                    i.pointer.primary_down(),
+                    i.pointer.delta(),
+                    i.pointer.hover_pos(),
+                )
+            });
+
+            if primary_pressed {
+                if let Some(pos) = hover_pos {
+                    if !grip_rect.contains(pos) {
+                        self.drag_pending = true;
+                    }
+                }
+            }
+
+            if !primary_down {
+                self.drag_pending = false;
+            }
+
+            if self.drag_pending && delta.length_sq() > 0.0 {
+                self.drag_pending = false;
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
+        }
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
             // The central panel the region left after adding TopPanel's and SidePanel's
-            ui.heading("eframe template");
 
             Plot::new("pedal_inputs")
-                // .view_aspect(2.0)
-                .view_aspect(6.0) // Keep the plot square since data is 0.0 to 1.0
                 .include_x(0.0)
-                .include_x(1.0)
                 .include_y(0.0)
-                .include_y(1.0)
+                .include_y(100.0)
+                .allow_zoom(false)
+                .allow_drag(false)
+                .allow_boxed_zoom(false)
+                .allow_scroll(false)
+                .allow_double_click_reset(false)
+                .show_axes([false, true])
+                .show_grid([false, true])
+                .show_background(false)
+                .show_x(false)
+                .show_y(false)
+                .clamp_grid(true)
                 .show(ui, |plot_ui| {
                     plot_ui.line(throttle_line);
                     plot_ui.line(brake_line);
                 });
-            // plot_ui.line(Line::new(points).width(2.0).color(egui::Color32::RED));
-
-            // ui.horizontal(|ui| {
-            //     ui.label("Write something: ");
-            //     ui.text_edit_singleline(&mut self.label);
-            // });
-
-            // ui.add(egui::Slider::new(&mut self.value, 0.0..=10.0).text("value"));
-            // if ui.button("Increment").clicked() {
-            //     self.value += 1.0;
-            // }
-
-            // ui.separator();
-
-            // ui.add(egui::github_link_file!(
-            //     "https://github.com/emilk/eframe_template/blob/main/",
-            //     "Source code."
-            // ));
-
-            // ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-            //     powered_by_egui_and_eframe(ui);
-            //     egui::warn_if_debug_build(ui);
-            // });
+            let drag = ui.interact(ui.max_rect(), ui.id().with("drag"), egui::Sense::drag());
+            if drag.drag_started() {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+            }
         });
+
+        draw_resize_grip(ui);
 
         ui.request_repaint();
     }
 }
 
-// fn powered_by_egui_and_eframe(ui: &mut egui::Ui) {
-//     ui.horizontal(|ui| {
-//         ui.spacing_mut().item_spacing.x = 0.0;
-//         ui.label("Powered by ");
-//         ui.hyperlink_to("egui", "https://github.com/emilk/egui");
-//         ui.label(" and ");
-//         ui.hyperlink_to(
-//             "eframe",
-//             "https://github.com/emilk/egui/tree/master/crates/eframe",
-//         );
-//         ui.label(".");
-//     });
-// }
+pub fn draw_resize_grip(ui: &mut egui::Ui) {
+    let panel_rect = ui.max_rect();
+    let grip_size = 14.0;
+    let grip_rect = egui::Rect::from_min_size(
+        egui::pos2(
+            panel_rect.right() - grip_size,
+            panel_rect.bottom() - grip_size,
+        ),
+        egui::Vec2::splat(grip_size),
+    );
+
+    let resp = ui.interact(
+        grip_rect,
+        ui.id().with("resize_grip"),
+        egui::Sense::click_and_drag(),
+    );
+
+    let p = ui.painter();
+    let br = grip_rect.right_bottom();
+    let col = Color32::from_rgba_unmultiplied(180, 180, 200, 160);
+    p.line_segment(
+        [
+            br - egui::vec2(grip_size, 0.0),
+            br - egui::vec2(0.0, grip_size),
+        ],
+        Stroke::new(1.5, col),
+    );
+    p.line_segment(
+        [
+            br - egui::vec2(grip_size * 0.55, 0.0),
+            br - egui::vec2(0.0, grip_size * 0.55),
+        ],
+        Stroke::new(1.5, col),
+    );
+    if resp.drag_started() {
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::BeginResize(
+                egui::ResizeDirection::SouthEast,
+            ));
+    }
+
+    if resp.hovered() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeNwSe);
+        ui.ctx().request_repaint();
+    }
+}
